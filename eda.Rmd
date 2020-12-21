@@ -1,0 +1,86 @@
+---
+title: "EDA"
+author: "Shyamsunder Sriram, ,"
+date: "2/17/2020"
+output: pdf_document
+---
+
+Loading training dataset (need to change filepath)
+```{r}
+train <- read.delim("datasets/cup98lrn.txt", sep=",")
+```
+
+Loading testign dataset (need to change filepath )
+```{r}
+test <- read.delim("datasets/cup98val.txt", sep=",")
+```
+
+```{r}
+df <- train
+```
+
+Checks proportion of nulls of columns in and testing dataset. 
+```{r}
+cols <- colnames(df)
+n <- length(cols)
+tot_tr <- nrow(df)
+tot_test <- nrow(test)
+null_columns = c() 
+for (i in 1:n){
+  ratio_train <- sum(is.na(df[, i])) / tot_tr
+  ratio_test <- sum(is.na(test[, i])) / tot_test
+  if (ratio_train > 0 | ratio_test > 0){
+    print(cols[i])
+    print(ratio_train)
+    print(ratio_test)
+    null_columns <- c(null_columns, i)
+  }
+}
+```
+
+Only taking columsn that have non-null values for income to create a preliminary model. (In the actual model we would impute the values for income. )
+```{r}
+df <- df[(is.na(df$INCOME) == FALSE),]
+```
+
+```{r}
+mini_df <- df[1:50000,]
+d1 <- mini_df[,457:465]
+targetb <- as.data.frame(mini_df['TARGET_B']) 
+d2 <- as.data.frame(mini_df['INCOME']) 
+dmod <- cbind(d1, d2, targetb)
+donations <- as.data.frame(mini_df['TARGET_D']) 
+ddon <- cbind(d1, d2, donations)
+head(dmod)
+```
+
+Tried doing a regression on donations. This had a poor R^2 value. We could try this again after we get success with the log reg model. 
+```{r}
+donfit <- lm(TARGET_D ~ . ,data=ddon,) # Donations don't work since R^2 is 0.005
+summary(donfit)
+```
+
+Creating logreg model. 
+```{r}
+fit <- glm(TARGET_B ~ . ,data=dmod, family='poisson')
+summary(fit)
+```
+
+```{r}
+val_df <- df[50001:75000,]
+val_target <- val_df['TARGET_B']
+d1 <- val_df[,457:465]
+d2 <- as.data.frame(val_df['INCOME']) 
+dval <- cbind(d1, d2)
+```
+
+```{r}
+pred <- predict(fit, newdata=dval)
+pred <- ifelse(pred > 0.15, 1, 0)
+```
+
+As of now, our max logit value is 0.23 and we need it to be a higher number (preferably over 0.5 for predictive purposes). However we only added the summary promotion statistics and income. Try adding more categorical predictors (such as cluster, numchildren, neighborhood statistics) or aggregate predictors (based on computations of multiple columns). Try to see whether you can increase our max logit value before we can start making predictions. 
+
+
+
+

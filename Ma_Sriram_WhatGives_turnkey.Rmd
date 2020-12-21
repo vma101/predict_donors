@@ -1,0 +1,693 @@
+---
+title: "What Gives? Algorithmic Marketing Project"
+author: "Vanessa Ma, Shyamsunder Sriram"
+date: "3/5/2020"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 3
+---
+
+# PREAMBLE
+This code contains 2 sections: data cleaning and the model.
+
+# DATA CLEANING
+This code contains the cleaning code for our 2-model solution. Broadly,
+Input: raw datasets for train and test data
+Outputs: (For the test dataset)
+ - Cleaned csvs - train, val, test data (conducted training and validation split)
+ - Propensity scores and covariate analysis for the raw dataset
+Important note: Please run using R versions older than 3.6.3 (ours was 1.2.5001) - the set seed function yields the same results for all versions of R older than 3.6.3, but beginning in 3.6.3 it yields different results.
+ - More details on this can be found here: https://stackoverflow.com/questions/47199415/is-set-seed-consistent-over-different-versions-of-r-and-ubuntu
+ 
+Setting up datasets and needed libraries
+```{r, setup}
+rm(list = ls())
+set.seed(43)
+library(tidyr)
+library(data.table)
+library(ggplot2)
+setwd("~/Coursework/Booth/Algorithmic Marketing/donors/datasets")
+train <- read.delim("cup98LRN.txt", sep=",")
+test <- read.delim("cup98val.txt", sep=",")
+```
+
+## Setting up Helper Functions
+
+We are doing significant data cleaning and initially manually constructing our dataset for both training and testing data. We are using the following legend when manually constructing dataset: 
+
+Remove: Remove predictor. Coupled with a justification. 
+Impute to Group: Impute missing values to a new group. (Meant for categorical variables)
+Impute to mean: Impute missing values to mean of dataset. 
+Impute to 0: Impute missing values to zero. 
+Transform to indicator: Sometime a variable will have an entry for a fraction of the dataset. It is more important whether the variable exists rather than the value. 
+
+We have created these transformation functions below. 
+```{r, transformation functions}
+indicator <- function(column){
+  column[is.na(column)] <- 0 
+  column[!is.na(column)] <- 1
+  return(column)
+}
+
+imputezero <- function(column){
+  column[is.na(column)] <- 0 
+  return(column)
+}
+
+imputemean <- function(column){
+  mean <- mean(!(is.na(column)))
+  column[is.na(column)] <- mean 
+}
+
+imputetogroup <- function(column){
+  column[(is.na(column)),] <- as.factor('0') 
+  return(column)  
+}
+
+removecolumns <- function(df, colstoremove){
+  return (df[ , -which(names(df) %in% colstoremove)])
+}
+```
+
+## Types of variables 
+- Demographics 
+- Mail Order Response 
+- Sources of Overlay Data 
+- Interests 
+- Census 
+- Promotions 
+
+### Chunking Out Dataset
+
+Let us create separate dataframes for these to keep track of the data cleaning. We kept track of the indices of the columns and hardcoded the split. 
+```{r, slice dataframes}
+# demographics dataframes
+demographics_train <- train[, c(1:28)]
+demographics_test <- test[, c(1:28)]
+
+# mail order response dataframes
+mailorder_train <- train[, c(29:42)]
+mailorder_test <- test[, c(29:42)]
+
+# Overlay Data sources
+overlay_train <- train[, c(43:55)]
+overlay_test <- test[, c(43:55)]
+
+# Interests
+interests_train <- train[, c(56:75)]
+interests_test <- test[, c(56:75)]
+
+# Census Data
+census_train <- train[, c(76:361)]
+census_test <- test[, c(76:361)]
+
+# Promotions Behaviour Per Mailing Variables
+promotions_train <- train[, c(362:407)]
+promotions_test <- test[, c(362:407)]
+
+# Promotions History Aggregate Variables
+sumprom_train <- train[, c(408:412)]
+sumprom_test <- test[, c(408:412)]
+
+# Giving Behavior Per Mailing Variables
+giving_train <- train[, c(413:456)]
+giving_test <- test[, c(413:456)]
+
+# Giving History Aggregate Variables
+sumgiving_train <- train[, c(457:469)]
+sumgiving_test <- test[, c(457:469)]
+
+# Targets (gave or not) for the coming mailing
+y_train <- train[, c(471:472)]
+```
+
+
+## Variables to Change/Remove 
+
+### Demographics: 
+The following columns are irrelevant and can be removed: 
+- ZIP, MAILCODE, PVASTATE, RECINSHE, RECP3, RECPGVG, RECSWEEP, STATE, TCODE, DOB
+
+The rest
+- ODATEW: Redundant information with missing values. 
+- OSOURCE: Redundant information with missing values 
+- CLUSTER: Impute to 0 (Categorical variable. Create new group). Also change datatype to factor from integer. 
+- NUMCHLD: Impute to 0
+- INCOME: Impute to mean income within DOMAIN. 
+- WEALTH1: Remove (missing half the data. Cannot impute) 
+- Since NUMCHLD is included we can remove the following columns: 
+- CHILD03, CHILD07, CHILD12, CHILD18
+- AGE has missing values (along with DOB) and AGEFLAG
+- MDMAUD would be highly correlated with other predictor. Just include if donor is a major donor or not.
+- GENDER: Remove gender due to inconsistent values.  
+
+#### IMPUTING INCOME:
+
+```{r, income impute}
+dft <- demographics_train
+domain_list <- unique(dft['DOMAIN'])[, 1]
+mean_incomes <- rep(0, length(domain_list))
+names(mean_incomes) <- domain_list 
+
+for (domain in domain_list){ 
+  mean_incomes[domain] <- mean(!(is.na(dft[(dft['DOMAIN'] == domain),]['INCOME'])))
+}
+
+# Function to impute income values 
+impute_income <- function(domain_list){
+  final_incomes <- c() 
+  for (dom in domain_list){
+    income <- mean_incomes[dom]
+    final_incomes <- c(final_incomes, income)
+  }
+  return(final_incomes)
+}
+
+final_incomes <- function(df){
+  df[(is.na(df['INCOME']) == TRUE),]['INCOME'] = impute_income(df[(is.na(df['INCOME']) == TRUE),]['DOMAIN'])
+  return(df)
+}
+``` 
+
+#### CLEANING ALL DEMOGRAPHICS
+
+```{r, demographic clean}
+change_demographics <- function(df){
+  df['CLUSTER'] <- imputezero(df['CLUSTER'])
+  df['CLUSTER'] <- lapply(df['CLUSTER'], as.factor)
+  df['NUMCHLD'] <- imputezero(df['NUMCHLD'])
+  df <- final_incomes(df)
+  df <- removecolumns(df, c('ODATEDW', 'OSOURCE', 'TCODE', 'DOB', 'WEALTH1', 'ZIP', 'CHILD03', 'CHILD07', 'CHILD09', 'CHILD12', 'CHILD18', 'MAILCODE', 'PVASTATE', 'RECINHSE', 'RECP3', 'RECPGVG', 'RECSWEEP', 'STATE', 'MDMAUD', 'AGE', 'AGEFLAG', 'GENDER'))
+  #df[(df['GENDER'] == 'C')]['GENDER'] <- 'U'
+  #df[(df['GENDER'] == 'A')]['GENDER'] <- 'U'
+  return(df)
+}
+
+demographics_train <- change_demographics(demographics_train)
+demographics_test <- change_demographics(demographics_test)
+# Check that there are no nulls in the final datasets.
+# table(is.na(demographics_train))
+# table(is.na(demographics_test))
+```
+
+### Census Data 
+- MSI: Remove, insufficient data 
+- ADI: Remove, insufficient data
+- DMA: Remove, insufficeint data 
+
+```{r}
+change_census <- function(df){
+  df <- removecolumns(df, c('MSA', 'ADI', 'DMA'))
+  return(df)
+}
+census_train <- change_census(census_train)
+census_test <- change_census(census_test)
+# Check that there are no nulls in the final datasets.
+# table(is.na(census_train))
+# table(is.na(census_test))
+```
+
+### Sources of Overlay Data 
+- SOLP3: Transform to indicator 
+- SOLIH: Transform to indicator. 
+- MAJOR: Remove (Improper data format). 
+- WEALTH2: Remove (missing half the data. Cannot impute) 
+- GEOCODE: Remove (missing half the data. Cannot impute) 
+
+```{r}
+change_overlay <- function(df){
+  df <- removecolumns(df, c('WEALTH2', 'GEOCODE', 'DATASRCE', 'MAJOR'))
+  df['SOLP3'] <- indicator(df['SOLP3'])
+  df['SOLIH'] <- indicator(df['SOLIH'])
+  return(df)
+}
+overlay_train <- change_overlay(overlay_train)
+overlay_test <- change_overlay(overlay_test)
+```
+
+### Mail Order Response  
+- Impute all missing variables to 0. 
+
+```{r}
+ncols <- ncol(mailorder_test)
+for (i in 1:ncols){
+  mailorder_train[, i] = imputezero(mailorder_train[, i])
+  mailorder_test[, i] =  imputezero(mailorder_test[, i])
+}
+# Check that there are no nulls in the final datasets.
+# table(is.na(mailorder_train))
+# table(is.na(mailorder_test))
+```
+
+### Interests
+- Remove LIFESRC due to insufficient data. 
+```{r}
+ncols <- ncol(interests_train)
+for (i in 1:ncols){
+  interests_train = removecolumns(interests_train, c('LIFESRC'))
+  interests_test = removecolumns(interests_test, c('LIFESRC'))
+}
+```
+
+### Promotions 
+(Summary Promotions are all valid) 
+```{r}
+nc <- ncol(promotions_train)
+for (i in 1:nc){
+  promotions_train[, i] = imputezero(promotions_train[, i])
+  promotions_test[, i] = imputezero(promotions_test[, i])
+}
+
+# find RFA columns and split into 3 for model matrix
+split_rfa = function(cols, df){
+  for(col in 1:length(rfa_cols)){
+  r_col = sprintf('R_%d', col+1)
+  f_col = sprintf('F_%d', col+1)
+  a_col = sprintf('A_%d', col+1)
+  df = df %>% separate(rfa_cols[col], c(r_col, f_col, a_col), sep = c(1, 2))
+  }
+  return(df)
+}
+
+rfa_cols = grep('RFA_[0-9]+', names(train), value = TRUE)
+rfa_cols = rfa_cols[!(rfa_cols %in% c('RFA_2R', 'RFA_2F', 'RFA_2A'))] # edge cases 
+promotions_train = split_rfa(rfa_cols, promotions_train)
+promotions_test = split_rfa(rfa_cols, promotions_test)
+```
+
+### Giving 
+```{r}
+ncols <- ncol(giving_test)
+for (i in 1:ncols){
+  giving_train[, i] = imputezero(giving_train[, i])
+  giving_test[, i] =  imputezero(giving_test[, i])
+}
+
+# Check that there are no nulls in the final datasets.
+# table(is.na(giving_train))
+# table(is.na(giving_test))
+```
+
+### Summary Giving 
+- Remove NEXTDATE and TIMELAG columns due to insufficient data. 
+```{r}
+sumgiving_train <- removecolumns(sumgiving_train, c('NEXTDATE', 'TIMELAG'))
+sumgiving_test <- removecolumns(sumgiving_test, c('NEXTDATE', 'TIMELAG'))
+# Check that there are no nulls in the final datasets.
+# table(is.na(sumgiving_train))
+# table(is.na(sumgiving_test))
+```
+
+## PIECING TOGETHER
+Now we are ready to create our final training and testing dataframes. 
+```{r}
+train_concat <- cbind(demographics_train, mailorder_train, overlay_train, interests_train, census_train, promotions_train, sumprom_train, giving_train, sumgiving_train, y_train)
+test_concat <- cbind(demographics_test, mailorder_test, overlay_test, interests_test, census_test, promotions_test, sumprom_test, giving_test, sumgiving_test)
+# head(test_final)
+```
+
+Remove all date of mailing columns, since the information is redundant with the RFA status updates of the donors.
+```{r}
+train_final <- train_concat[, -grep("\\wDATE_\\d+", colnames(train_concat))]
+test_final <- test_concat[, -grep("\\wDATE_\\d+", colnames(test_concat))]
+```
+
+Doing training and validation split. 
+```{r}
+n <- nrow(train_final)
+new_indices <- sample(n)
+df <- train_final[new_indices,]
+split <- ceiling(n * 0.8)
+train_tocsv <- df[1:split,]
+val <- df[(split + 1):n,]
+# ncol(test_final)
+write.csv(train_tocsv, "train.csv")
+write.csv(val, "val.csv")
+write.csv(test_final, "test.csv")
+```
+
+## EXPLORATORY DATA ANALYSIS
+This was done in a few methods:
+- Propensity Score calculation
+- Covariate Balance
+
+### Propensity Score Calculation:
+Because there are so many mailings available to us, the propensity score was only calculated on a few of the mailings. This therefore assumes that the mailing is done the same way every time (i.e. results from one mailing can be cross-applied to all mailings)
+
+```{r, checking}
+seg = "ADATE_7"
+train_check = cbind(demographics_train, mailorder_train, overlay_train, interests_train, census_train)
+treat <- ifelse(is.na(train[, grep(seg, colnames(train), value = TRUE)]), 0, 1)
+train_check$treat = treat
+
+factor_cols <- sapply(train_check, function(x) is.factor(x))
+which(n <- sapply(train_check[, factor_cols], function(x) length(unique(x)) <2))
+
+# Fit
+treat_fit = glm(treat ~ ., data = train_check, family = "binomial" )
+summary(treat_fit)
+pred = predict(treat_fit, type = "response")
+
+treat_DT = data.table(Treatment = treat, value = pred, variable = "Mailing Sent")
+treat_DT[, Treatment := as.factor(Treatment)]
+
+ggplot(treat_DT, aes(x = value, fill= Treatment)) +
+  geom_density(alpha = 0.3) +
+  xlab("Propensity Score") +
+  ylab("Density") +
+  facet_wrap(~ variable, nrow = 2) +
+  theme_bw() +
+  ggtitle("Propensity Scores for Variable ADATE7")
+  theme(strip.background = element_rect(colour = "gray40", fill = "aliceblue"))
+
+```
+
+### Covariate Balance
+Only a subsection of covariates are selected for analysis because of the sheer largeness of this dataset.
+Even then, it is clear that the "treated" and "non-treated" segments vary greatly with respect to these characteristics.
+
+```{r, covariate balance}
+X_vars <- c(colnames(demographics_train), colnames(mailorder_train), colnames(overlay_train), colnames(interests_train), colnames(census_train))
+X_DT        <- train[, c(X_vars)]
+X_DT$treat = treat
+
+# Summary Statistics for Treatment
+
+X_treat_DT <- X_DT[treat == 1,]
+summary(X_treat_DT)
+table(X_treat_DT$INCOME)/nrow(X_treat_DT)
+table(X_treat_DT$DOMAIN)/nrow(X_treat_DT)
+table(X_treat_DT$HOMEOWNR)/nrow(X_treat_DT)
+table(X_treat_DT$VETERANS)/nrow(X_treat_DT)
+table(X_treat_DT$CLUSTER) /nrow(X_treat_DT)
+plot(table(X_treat_DT$CLUSTER) /nrow(X_treat_DT), main = "Cluster Frequencies for Treated Set (Mailing ADATE7)", xlab = "Cluster", ylab = "% of Total")
+
+
+X_none_DT <- X_DT[treat == 0,]
+summary(X_none_DT)
+table(X_none_DT$INCOME)/nrow(X_none_DT)
+table(X_none_DT$HOMEOWNR)/nrow(X_none_DT)
+table(X_none_DT$DOMAIN)/nrow(X_none_DT)
+table(X_none_DT$VETERANS)/nrow(X_none_DT)
+table(X_none_DT$CLUSTER) /nrow(X_none_DT)
+plot(table(X_none_DT$CLUSTER) /nrow(X_none_DT), main = "Cluster Frequencies for Non-Treated Set (Mailing ADATE7)", xlab = "Cluster", ylab = "% of Total")
+```
+
+
+# MODEL FITTING
+This code contains the turnkey code for our 2-model solution. Broadly,
+Input: cleaned datasets for train, validation, and test data
+Outputs: (For the test dataset)
+ - Predicted responses
+ - Predicted donation amounts
+ - Estimated profits
+
+Setting up the datasets and needed libraries. 
+```{r}
+# setwd("~/Downloads")
+# setwd("~/Coursework/Booth/Algorithmic Marketing/donors/datasets")
+rm(list = ls())
+library(tidyr)
+library(data.table)
+library(ade4)
+library(car)
+library(faraway)
+library(StatMeasures)
+library(pROC)
+
+train <- read.csv("train.csv", header=TRUE)
+val <- read.csv("val.csv", header=TRUE)
+test<- read.csv("test.csv", header=TRUE)
+```
+
+## To answer question 1 - will a donor donate or not?
+
+### LOGIT MODEL: Creating the logit model to predict responses
+```{r}
+repeated_glm_B <- function(df){
+  mod <- glm(TARGET_B ~ . -1, data = df)
+  summary_mod <- summary(mod)
+  coef_values <- data.frame(summary_mod$coefficients)[-c(1),]
+  red_predictors <- subset(coef_values, coef_values['Pr...t..'] < 0.08)
+  predictors <- rownames(data.frame(red_predictors))
+  red_df <- df[predictors]
+  TARGET_B <- df$TARGET_B
+  red_df <- cbind(red_df, TARGET_B)
+  return(red_df)
+}
+
+train_b <- train[,-c(315:383, 388, 391, 156, 385, 415, 419, 423)] # remove RFA and Date columns
+train_b$CLUSTER <- as.factor(train_b$CLUSTER)
+t.mm <- model.matrix(~., data = train_b)
+t.mm_df = data.frame(t.mm)
+df_b = t.mm_df
+for (i in c(1:5)){
+  df_b <- repeated_glm_B(df_b)
+}
+final_df_lg <- df_b
+final_mod_lg <- glm(TARGET_B ~ . -1 , data=final_df_lg)
+```
+
+### LOGIT MODEL: Selected predictors
+```{r}
+summary(final_mod_lg)
+```
+ - Majority of values are giving history variables - RAMNT_??
+ - Some census variables
+ - Limited demographic and past mail order response variables - HOMEOWNRU, NUMCHLD, INCOME, MBCRAFT
+
+### LOGIT MODEL: Validation
+```{r}
+val_ <- val[,-c(315:383, 388, 391, 156, 385, 415, 419, 423)] # remove RFA and Date columns
+val_$CLUSTER <- as.factor(val_$CLUSTER)
+v.mm <- model.matrix(~., data = val_)
+v.mm_df = data.frame(v.mm)
+newval = v.mm_df
+newval$pred_B <- predict(final_mod_lg, newdata=newval, type='response')
+
+threshold <- min(newval$pred_B[decile(newval$pred_B) == 10])
+newval$pred_B <- ifelse(newval$pred_B > 1, 1, newval$pred_B)
+newval$pred_B <- ifelse(newval$pred_B < 0, 0, newval$pred_B)
+finalpred <- ifelse(newval$pred_B > threshold, 1, 0)
+table(val$TARGET_B, finalpred)
+
+g <- roc(TARGET_B ~ newval$pred_B, data = newval)
+plot(g, main='ROC Curve for Logit Model')   
+auc(g)
+```
+
+### LOGIT MODEL: Threshold values and predictions. 
+```{r}
+pred <- predict(final_mod_lg, newdata=newval, type='response')
+pred <- ifelse(pred < 0, 0, pred)
+TARGET <- val$TARGET_B
+deciles <- c(1:10)
+
+thresholds <- c()
+capture_rates <- c() 
+conversion_rates <- c() 
+aucs <- c() 
+
+for (i in c(1:10)){
+  t <- min(pred[decile(pred) == i])
+  thresholds <- c(thresholds, t)
+  demo_pred <- ifelse(pred < t, 0, 1)
+  res_df <- as.data.frame(cbind(demo_pred, TARGET))
+  capture_rate <- nrow(res_df[(res_df$demo_pred == 1 & res_df$TARGET == 1),]) / nrow(res_df[res_df$TARGET == 1,])
+  conversion_rate <- nrow(res_df[(res_df$demo_pred == 1 & res_df$TARGET == 1),]) / nrow(res_df[res_df$demo_pred == 1,])
+  capture_rates <- c(capture_rates, capture_rate)
+  conversion_rates <- c(conversion_rates, conversion_rate)
+  g <- roc(TARGET_B ~ demo_pred, data = newval, verbose=FALSE)
+  aucs <- c(aucs, auc(g))
+}
+pred_stats <- data.frame(decile=deciles, threshold=thresholds, true_capture_rate=capture_rates, true_conversion_rate=conversion_rates, auc=aucs) 
+true_cap <- pred_stats$true_capture_rate 
+next_cap <- c()
+for (j in c(2:10)){
+  next_cap <- c(next_cap, true_cap[j])
+}
+next_cap <- c(next_cap, 0)
+incr_cap <- true_cap - next_cap 
+pred_stats$incremental_capture_rate <- incr_cap
+pred_stats
+```
+
+## To answer question 2 - given a donor donates, how much is at stake?
+
+### LINEAR MODEL: Creating linear model to predict donations
+```{r, donations}
+donations_train <- train[train$TARGET_D > 0,]
+donations_train <- donations_train[,-c(315:383, 388, 391, 156, 385, 415, 419, 420, 422)] # remove RFA, Date, 
+donations_train$CLUSTER <- as.factor(donations_train$CLUSTER)
+dt.mm <- model.matrix(~., data = donations_train[, -c(351)]) # remove TARGET_B, TARGET_D columns, 
+
+#### PREP FOR REITERATION ####
+dt.mm_df = data.frame(dt.mm)
+
+repeated_lm <- function(df){
+  mod <- lm(TARGET_D ~ . -1, data = df)
+  summary_mod <- summary(mod)
+  coef_values <- data.frame(summary_mod$coefficients)[-c(1),]
+  red_predictors <- subset(coef_values, coef_values['Pr...t..'] < 0.10)
+  predictors <- rownames(data.frame(red_predictors))
+  red_df <- df[predictors]
+  TARGET_D <- df$TARGET_D
+  red_df <- cbind(red_df, TARGET_D)
+  return(red_df)
+}
+
+df_ = dt.mm_df[, -c(1:2)]
+for (i in c(1:10)){
+  df_ <- repeated_lm(df_)
+}
+trunc_df <- df_
+trunc_mod <- lm(TARGET_D ~ . -1, data=trunc_df)
+vif(trunc_mod)
+```
+
+### LINEAR MODEL: Limited collinearity in the model. Removing outlier points through jacknife residuals 
+```{r}
+bad_vifs_lm <- c('DW1', 'HUR2', 'RHP1', 'RHP2')
+X <- trunc_df[,!(names(trunc_df) %in% bad_vifs_lm)]
+jack <- rstudent(trunc_mod)
+ordered_jack <- jack[order(abs(jack))]
+n <- nrow(X)
+p <- ncol(X)
+bon <- qt(1 - .05/(50*2), n-p)
+outliers <- ordered_jack[abs(ordered_jack) > bon]
+outlier_indices <- as.integer(names(outliers))
+
+cook <- cooks.distance(trunc_mod)
+halfnorm(cook, 3, labs= 1:nrow(X), ylab="Cooks distances")
+ginf <- influence(trunc_mod)
+halfnorm(ginf$hat, 3, labs= 1:nrow(X), ylab="Influences")
+```
+
+### LINEAR MODEL: Removing influential indices, outputting final predictors
+```{r}
+influential_indices <- as.integer(c(outlier_indices, 2865, 3708, 2655, 1719, 207)) 
+final_df <- trunc_df[-influential_indices,]
+final_mod_lm <- lm(TARGET_D ~ . -1, data=final_df)
+summary(final_mod_lm)
+plot(final_mod_lm)
+
+
+```
+
+With these precautions, linear regression assumptions hold true. Compared to the logit model, there are fewer resulting predictors.
+ - An overwhelmingly large portion of predictors are past giving history variables
+ - RHP2 - number of rooms in each housing unit
+ - EIC5 - percentage of persons employed in agriculture
+Seems to indicate that people are creatures of habit - having given once, they are likely to give again.
+
+
+## ROLLING UP: Estimating profits by incorporating both models. 
+
+Setting up analysis functions.
+```{r}
+# Calculating profits overall
+
+
+
+find_profit <- function(df, prob, cost_of_sending){
+  df$pred_D <- predict(final_mod_lm, newdata=df)
+  df$pred_prob <- predict(final_mod_lg, newdata=df, type='response')
+  df$pred_D <- ifelse(df$pred_D < 0, 0, df$pred_D)
+  df$pred_prob <- ifelse(df$pred_prob < 0, 0, df$pred_prob)
+  df$pred_prob <- ifelse(df$pred_prob > 1, 1, df$pred_prob)
+  df$pred_B <- ifelse(df$pred_prob < prob, 0, 1)
+  df$pred_profits <- ((df$pred_D * df$pred_prob) - cost_of_sending) * df$pred_B
+  return (sum(df$pred_profits))
+}
+
+# Calculating cumulative profits by decile of donors (from 10 to 1)
+profits_by_decile <- function(df, cost_of_sending){
+  deciles <- c(1:10)
+  profits_by_decile <- c() 
+  for (t in pred_stats$threshold){
+    p <- find_profit(df, t, cost_of_sending)
+    profits_by_decile <- c(profits_by_decile, p)
+  } 
+  pstats <- data.frame(decile=deciles, profit_by_decile_and_up=profits_by_decile)
+  return (pstats)
+}
+
+# Calculating probability threshold for each decile
+thresholds <- pred_stats$threshold
+upper_threshold <- c() 
+for (i in 2:10){
+  upper_threshold <- c(upper_threshold, thresholds[i])
+}
+upper_threshold <- c(upper_threshold, 1)
+
+# Calculating incremental profit compared to random chance overall
+incremental_profit <- function(input_df, lower_t, upper_t, cost_of_sending){
+  df <- input_df
+  df$pred_D <- predict(final_mod_lm, newdata=df)
+  df$pred_prob <- predict(final_mod_lg, newdata=df, type='response')
+  df$pred_D <- ifelse(df$pred_D < 0, 0, df$pred_D)
+  df$pred_prob <- ifelse(df$pred_prob < 0, 0, df$pred_prob)
+  df$pred_prob <- ifelse(df$pred_prob > 1, 1, df$pred_prob)
+  df$pred_B <- ifelse((upper_t > df$pred_prob  & df$pred_prob > lower_t), 1, 0)
+  df$pred_profits <- ((df$pred_D * df$pred_prob) - cost_of_sending) * df$pred_B
+  return (sum(df$pred_profits))
+}
+
+# Calculating incremental profit per decile
+decile_incremental_profit <- function(input_df, cost_of_sending){
+  incr_profits <- c() 
+  deciles <- c(1:10)
+  for (dec in deciles){
+    u <- upper_threshold[dec]
+    l <- thresholds[dec]
+    p <- incremental_profit(input_df, l, u, cost_of_sending)
+    incr_profits <- c(incr_profits, p)
+  }
+  df_res <- data.frame(decile=deciles, profits_by_decile=incr_profits)
+  return (df_res)
+}
+```
+
+### ROLLING UP: Calculating the profits if - Blast email strategy in the validation dataset. 
+```{r}
+sum(val$TARGET_D) - nrow(val) * 0.68
+```
+Using a blanket mailing strategy would have yielded true donation results of $15254. However, the profits would have been 2278.74
+
+### ROLLING UP: Looking at what per decile incremental profit to determine what deciles to target
+```{r}
+decile_incremental_profit(newval, 0.68)
+```
+
+It looks like from the 3rd decile and up we get profits.
+
+### ROLLING UP: Deploying model onto test set to get profits
+```{r}
+test_ <- test[,-c(315:383, 388, 391, 156, 385, 415, 419, 420)] # remove RFA and Date columns
+test_$CLUSTER <- as.factor(test_$CLUSTER)
+tt.mm <- model.matrix(~., data = test_)
+newtest = data.frame(tt.mm)
+```
+
+This is our final test prediction. 
+```{r}
+find_profit(newtest, thresholds[3], 0.68)
+```
+
+As a sanity check, let's make sure that this is the maximum profits we get. 
+
+```{r}
+profits_by_decile(newtest, 0.68)
+```
+
+# CONCLUSION
+Taking the "baseline" as the strategy of targeting everyone - i.e. cumulative profits if we targeted everyone from all 10 deciles:
+$ 12857.
+
+The maximum profits can be received if we target everyone from the 3rd decile and above, and max out at
+$ 14887.
+
+Thus, targeting via this model is able to capture an additional 16% of profit.
+

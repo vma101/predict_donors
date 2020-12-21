@@ -1,0 +1,302 @@
+---
+title: "Data Cleaning"
+author: "Vanessa Ma, Shyamsunder Sriram"
+date: "3/5/2020"
+output: pdf_document
+---
+
+```{r, setup}
+rm(list = ls())
+library(tidyr)
+setwd("~/Coursework/Booth/Algorithmic Marketing/donors/datasets")
+train <- read.delim("cup98LRN.txt", sep=",")
+test <- read.delim("cup98val.txt", sep=",")
+```
+
+We are doing significant data cleaning and initially manually constructing our dataset for both training and testing data. We are using the following legend when manually constructing dataset: 
+
+Remove: Remove predictor. Coupled with a justification. 
+Impute to Group: Impute missing values to a new group. (Meant for categorical variables)
+Impute to mean: Impute missing values to mean of dataset. 
+Impute to 0: Impute missing values to zero. 
+Transform to indicator: Sometime a variable will have an entry for a fraction of the dataset. It is more important whether the variable exists rather than the value. 
+
+We have created these transformation functions below. 
+```{r, transformation functions}
+indicator <- function(column){
+  column[is.na(column)] <- 0 
+  column[!is.na(column)] <- 1
+  return(column)
+}
+
+imputezero <- function(column){
+  column[is.na(column)] <- 0 
+  return(column)
+}
+
+imputemean <- function(column){
+  mean <- mean(!(is.na(column)))
+  column[is.na(column)] <- mean 
+}
+
+imputetogroup <- function(column){
+  column[(is.na(column)),] <- as.factor('0') 
+  return(column)  
+}
+
+removecolumns <- function(df, colstoremove){
+  return (df[ , -which(names(df) %in% colstoremove)])
+}
+```
+
+## Types of variables 
+- Demographics 
+- Mail Order Response 
+- Sources of Overlay Data 
+- Interests 
+- Census 
+- Promotions 
+
+Let us create separate dataframes for these to keep track of the data cleaning. We kept track of the indices of the columns and hardcoded the split. 
+```{r, slice dataframes}
+# demographics dataframes
+demographics_train <- train[, c(1:28)]
+demographics_test <- test[, c(1:28)]
+
+# mail order response dataframes
+mailorder_train <- train[, c(29:42)]
+mailorder_test <- test[, c(29:42)]
+
+# Overlay Data sources
+overlay_train <- train[, c(43:55)]
+overlay_test <- test[, c(43:55)]
+
+# Interests
+interests_train <- train[, c(56:75)]
+interests_test <- test[, c(56:75)]
+
+# Census Data
+census_train <- train[, c(76:361)]
+census_test <- test[, c(76:361)]
+
+# Promotions Behaviour Per Mailing Variables
+promotions_train <- train[, c(362:407)]
+promotions_test <- test[, c(362:407)]
+
+# Promotions History Aggregate Variables
+sumprom_train <- train[, c(408:412)]
+sumprom_test <- test[, c(408:412)]
+
+# Giving Behavior Per Mailing Variables
+giving_train <- train[, c(413:456)]
+giving_test <- test[, c(413:456)]
+
+# Giving History Aggregate Variables
+sumgiving_train <- train[, c(457:469)]
+sumgiving_test <- test[, c(457:469)]
+
+# Targets (gave or not) for the coming mailing
+y_train <- train[, c(471:472)]
+```
+
+## Variables to Change/Remove 
+
+### Demographics: 
+The following columns are irrelevant and can be removed: 
+- ZIP, MAILCODE, PVASTATE, RECINSHE, RECP3, RECPGVG, RECSWEEP, STATE, TCODE, DOB
+
+The rest
+- ODATEW: Redundant information with missing values. 
+- OSOURCE: Redundant information with missing values 
+- CLUSTER: Impute to 0 (Categorical variable. Create new group). Also change datatype to factor from integer. 
+- NUMCHLD: Impute to 0
+- INCOME: Impute to mean income within DOMAIN. 
+- WEALTH1: Remove (missing half the data. Cannot impute) 
+- Since NUMCHLD is included we can remove the following columns: 
+- CHILD03, CHILD07, CHILD12, CHILD18
+- AGE has missing values (along with DOB) and AGEFLAG
+- MDMAUD would be highly correlated with other predictor. Just include if donor is a major donor or not.
+- GENDER: Remove gender due to inconsistent values.  
+
+IMPUTING INCOME:
+
+```{r, income impute}
+dft <- demographics_train
+domain_list <- unique(dft['DOMAIN'])[, 1]
+mean_incomes <- rep(0, length(domain_list))
+names(mean_incomes) <- domain_list 
+
+for (domain in domain_list){ 
+  mean_incomes[domain] <- mean(!(is.na(dft[(dft['DOMAIN'] == domain),]['INCOME'])))
+}
+
+# Function to impute income values 
+impute_income <- function(domain_list){
+  final_incomes <- c() 
+  for (dom in domain_list){
+    income <- mean_incomes[dom]
+    final_incomes <- c(final_incomes, income)
+  }
+  return(final_incomes)
+}
+
+final_incomes <- function(df){
+  df[(is.na(df['INCOME']) == TRUE),]['INCOME'] = impute_income(df[(is.na(df['INCOME']) == TRUE),]['DOMAIN'])
+  return(df)
+}
+``` 
+
+CLEANING ALL DEMOGRAPHICS
+```{r, demographic clean}
+change_demographics <- function(df){
+  df['CLUSTER'] <- imputezero(df['CLUSTER'])
+  df['CLUSTER'] <- lapply(df['CLUSTER'], as.factor)
+  df['NUMCHLD'] <- imputezero(df['NUMCHLD'])
+  df <- final_incomes(df)
+  df <- removecolumns(df, c('ODATEDW', 'OSOURCE', 'TCODE', 'DOB', 'WEALTH1', 'ZIP', 'CHILD03', 'CHILD07', 'CHILD09', 'CHILD12', 'CHILD18', 'MAILCODE', 'PVASTATE', 'RECINHSE', 'RECP3', 'RECPGVG', 'RECSWEEP', 'STATE', 'MDMAUD', 'AGE', 'AGEFLAG', 'GENDER'))
+  #df[(df['GENDER'] == 'C')]['GENDER'] <- 'U'
+  #df[(df['GENDER'] == 'A')]['GENDER'] <- 'U'
+  return(df)
+}
+
+demographics_train <- change_demographics(demographics_train)
+demographics_test <- change_demographics(demographics_test)
+# Check that there are no nulls in the final datasets.
+# table(is.na(demographics_train))
+# table(is.na(demographics_test))
+```
+
+### Census Data 
+- MSI: Remove 
+- ADI: Remove 
+- DMA: Remove 
+
+```{r}
+change_census <- function(df){
+  df <- removecolumns(df, c('MSA', 'ADI', 'DMA'))
+  return(df)
+}
+census_train <- change_census(census_train)
+census_test <- change_census(census_test)
+# Check that there are no nulls in the final datasets.
+# table(is.na(census_train))
+# table(is.na(census_test))
+```
+
+### Sources of Overlay Data 
+- SOLP3: Transform to indicator 
+- SOLIH: Transform to indicator. 
+- MAJOR: Remove (Improper data format). 
+- WEALTH2: Remove (missing half the data. Cannot impute) 
+- GEOCODE: Remove (missing half the data. Cannot impute) 
+
+```{r}
+change_overlay <- function(df){
+  df <- removecolumns(df, c('WEALTH2', 'GEOCODE', 'DATASRCE', 'MAJOR'))
+  df['SOLP3'] <- indicator(df['SOLP3'])
+  df['SOLIH'] <- indicator(df['SOLIH'])
+  return(df)
+}
+overlay_train <- change_overlay(overlay_train)
+overlay_test <- change_overlay(overlay_test)
+```
+
+### Mail Order Response  
+- Impute all missing variables to 0. 
+
+```{r}
+ncols <- ncol(mailorder_test)
+for (i in 1:ncols){
+  mailorder_train[, i] = imputezero(mailorder_train[, i])
+  mailorder_test[, i] =  imputezero(mailorder_test[, i])
+}
+# Check that there are no nulls in the final datasets.
+# table(is.na(mailorder_train))
+# table(is.na(mailorder_test))
+```
+
+### Interests
+- Remove LIFESRC due to insufficient data. 
+```{r}
+ncols <- ncol(interests_train)
+for (i in 1:ncols){
+  interests_train = removecolumns(interests_train, c('LIFESRC'))
+  interests_test = removecolumns(interests_test, c('LIFESRC'))
+}
+```
+
+### Promotions (Summary Promotions are all valid) 
+```{r}
+nc <- ncol(promotions_train)
+for (i in 1:nc){
+  promotions_train[, i] = imputezero(promotions_train[, i])
+  promotions_test[, i] = imputezero(promotions_test[, i])
+}
+
+# find RFA columns and split into 3 for model matrix
+split_rfa = function(cols, df){
+  for(col in 1:length(rfa_cols)){
+  r_col = sprintf('R_%d', col+1)
+  f_col = sprintf('F_%d', col+1)
+  a_col = sprintf('A_%d', col+1)
+  df = df %>% separate(rfa_cols[col], c(r_col, f_col, a_col), sep = c(1, 2))
+  }
+  return(df)
+}
+
+rfa_cols = grep('RFA_[0-9]+', names(train), value = TRUE)
+rfa_cols = rfa_cols[!(rfa_cols %in% c('RFA_2R', 'RFA_2F', 'RFA_2A'))] # edge cases 
+promotions_train = split_rfa(rfa_cols, promotions_train)
+promotions_test = split_rfa(rfa_cols, promotions_test)
+```
+
+### Giving 
+```{r}
+ncols <- ncol(giving_test)
+for (i in 1:ncols){
+  giving_train[, i] = imputezero(giving_train[, i])
+  giving_test[, i] =  imputezero(giving_test[, i])
+}
+
+# Check that there are no nulls in the final datasets.
+# table(is.na(giving_train))
+# table(is.na(giving_test))
+```
+
+### Summary Giving 
+- Remove NEXTDATE and TIMELAG columns due to insufficient data. 
+```{r}
+sumgiving_train <- removecolumns(sumgiving_train, c('NEXTDATE', 'TIMELAG'))
+sumgiving_test <- removecolumns(sumgiving_test, c('NEXTDATE', 'TIMELAG'))
+# Check that there are no nulls in the final datasets.
+# table(is.na(sumgiving_train))
+# table(is.na(sumgiving_test))
+```
+
+Now we are ready to create our final training and testing dataframes. 
+```{r}
+train_concat <- cbind(demographics_train, mailorder_train, overlay_train, interests_train, census_train, promotions_train, sumprom_train, giving_train, sumgiving_train, y_train)
+test_concat <- cbind(demographics_test, mailorder_test, overlay_test, interests_test, census_test, promotions_test, sumprom_test, giving_test, sumgiving_test)
+# head(test_final)
+```
+
+Remove all date of mailing columns, since the information is redundant with the RFA status updates of the donors.
+```{r}
+train_final <- train_concat[, -grep("\\wDATE_\\d+", colnames(train_concat))]
+test_final <- test_concat[, -grep("\\wDATE_\\d+", colnames(test_concat))]
+```
+
+Doing training and validation split. 
+```{r}
+set.seed(43)
+n <- nrow(train_final)
+new_indices <- sample(n)
+df <- train_final[new_indices,]
+split <- ceiling(n * 0.8)
+train <- df[1:split,]
+val <- df[(split + 1):n,]
+# ncol(test_final)
+write.csv(train, "train.csv")
+write.csv(val, "val.csv")
+write.csv(test_final, "test.csv")
+```
