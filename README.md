@@ -1,2 +1,4 @@
-# donors
-Algorithmic Marketing project for BUSN 37304 (Digital and Algorithmic Marketing at Chicago Booth) that finds potential donors for a national veterans organization. 
+# Algorithmic Marketing: Predicting Donors
+Project for algorithmic marketing graduate coursework at the Booth School of Business (University of Chicago). Predicts highest LTV donors from existing dataset of mail campaign responses. 
+
+Language: Python.
